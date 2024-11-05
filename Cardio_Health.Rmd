@@ -24,8 +24,11 @@ library(corrplot)
 library(Hmisc)
 library(sjPlot)
 library(caret)
+library(alr4)
+library(caTools)
 library(ROCR)
 library(pROC)
+library(ROSE)
 ```
 
 # EDA
@@ -942,8 +945,14 @@ xlab(" ")
 
 &nbsp;&nbsp;
 
-### ROC
+### Convert remaining variables to factors
+```{r}
+framingham_df$male <- as.factor(framingham_df$male)
+framingham_df$age_group <- as.factor(framingham_df$age_group)
+framingham_df$smoker_type <- as.factor(framingham_df$smoker_type)
+```
 
+### ROC
 ```{r}
 CHD_Table <- table(framingham_df$TenYearCHD)
 prec_rec_baseline <- CHD_Table[2]/sum(CHD_Table)
@@ -1008,6 +1017,8 @@ plot(prec_rec_curve_rf, add = TRUE, col = "green") + abline(prec_rec_baseline,0)
 
 ```
 
+**Analysis: ** Based on the ROC curve above, it seems that the models with and without interaction are pretty comparable, although both perform better than the random Forest model.
+
 ### Confusion Matrices
 ```{r}
 # No Interaction Model
@@ -1027,6 +1038,8 @@ rf_table <- table(test_data$TenYearCHD, rf_threshold)
 confusionMatrix(rf_table)
 
 ```
+
+**Analysis:** We set the cutoff for the models with and without interaction at .5. While it does not maximize accuracy or sensitivity, it creates a good balance between the two. For the model without interaction the accuracy is about 67% and sensitivity is at 92%. For the model with interaction the accuracy is about 66% and sensitivity is at 94%. For the random forest model, we set the cutoff at .1. This results in 60% accuracy with 89% sensitivity. Based on the confusion matrices, it appears that either the model with interaction or the model without interaction could be used. However, since we are trying to predict the likelihood of having 10 year risk of CHD, sensitivity is the more important metric when determining which model to choose. As a result, it looks like choosing the model with the interaction is the better option since we are gaining 2% sensitivity for a 1% loss in accuracy. The random forest model has a lower accuracy and sensitivity, so it isn't as effective as the other two models.  
 
 ### Calculate AUC and Confidence Intervals
 ```{r}
@@ -1073,18 +1086,9 @@ ci_df <- data.frame(x = x, y = y, low = low, up = up)
 ggplot(ci_df, aes(x,y)) + geom_point() + geom_errorbar(aes(xmin = low, xmax = up)) + xlim(.6,1.00) + xlab("AUC") + ylab("Model")
 ```
 
-### Odds Ratios, CI, and P-values
-```{r}
-# No Interaction Model
-no_int_summary <- summary(best_LR_no_int)
-no_int_odds <- exp(coef(best_LR_no_int))
-no_int_odds_ci <- exp(confint(best_LR_no_int))
-no_int_pvalues <- no_int_summary$coefficients[,4]
-no_int_matrix <- data.frame(no_int_odds, no_int_odds_ci, no_int_pvalues)
-no_int_matrix <- no_int_matrix %>% rename(odds_ratio = no_int_odds, X2.5 =  X2.5.., X97.5 = X97.5.., pvalues = no_int_pvalues)
-no_int_matrix
-```
+**Analysis: ** Based on the graph above, the model with interaction performs a little bit better than the model with no interaction term. The mean of the AUC confidence interval for the model with interaction is .756 and the mean of the AUC confidence interval for the model without interaction is .751. There is not much of a difference between the two models, but both models perform better than the random forest model. The mean of the AUC confidence interval for the random forest model is .691.
 
+### Odds Ratios, CI, and P-values
 
 ```{r}
 # With Interaction Model
@@ -1098,14 +1102,31 @@ w_int_matrix
 ```
 
 ### Plot Odds Ratios and Confidence Intervals
-```{r}
-# No interaction
-plot_model(best_LR_no_int)
-```
 
 ```{r}
 #With Interaction
 plot_model(best_LR_w_int)
 ```
 
+**Analysis:** The interpretation of the odds ratios are as follows:  
+1) Compared to females, males are 78% more likely to have 10 year risk of CHD
+2) Compared to those who have not previously had a stroke, those who previously had a stroke are 2.13 times more likely to have 10 year risk of CHD  
+3) Compared to those who are not hypertensive, those who are hypertensive are 37% more likely have 10 year risk of CHD.  
+4) As Total Cholesterol level increases by one unit, the odds of having 10 year risk of CHD does not change in any significant way .  
+5) As systolic blood pressure increases by one unit, the odds of having 10 year risk of CHD increases by 1.6%.  
+6) As Diastolic Blood pressure increases by one unit, the odds of having 10 year risk of CHD decreases by about 10%.  
+7) As Glucose level increases by one unit, the odds of having 10 year risk of CHD does not change in any significant way.  
+8) Compared to those aged in their 30s, those aged in their 40s are 98% more likely to have 10 year risk of CHD.  
+9) Compared to those aged in their 30s, those aged in their 50s are 3.8 times more likely to have 10 year risk of CHD.  
+10) Compared to those aged in their 30s, those aged in their 60s and above are 5.19 times more likely to have 10 year risk of CHD.  
+11) As age increases by one year and cigarettes per day increases by one cigarette, the odds of having 10 year risk of CHD does not change in any significant way. 
+12) As Diastolic Blood pressure squared increases by one unit, the odds of 10 year risk of CHD does not change in any significant way.
+
+```{r}
+# 10 unit increase in interaction age_cigs
+exp(.0003572*10)
+
+# 10 unit increase in diaBP_quad
+exp(.0005612*10)
+```
 
