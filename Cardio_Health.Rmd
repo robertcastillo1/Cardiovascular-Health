@@ -1,0 +1,531 @@
+---
+title: "Cardiovascular Health"
+author: "Robert Castillo"
+date: '2022-11-14'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading the Data & Libraries
+
+```{r, echo = FALSE}
+library(dplyr)
+library(effects)
+library(car)
+library(randomForest)
+library(readr)
+library(ggplot2)
+library(DAAG)
+library(RColorBrewer)
+library(corrplot)
+library(Hmisc)
+```
+
+# EDA
+
+```{r}
+data_all <- read.csv("framingham.csv")
+
+n_rows <- nrow(data_all)
+n_na <- sum(!complete.cases(data_all))
+
+cat('Percentage of rows with missing values: ',
+     n_na/n_rows)
+
+coul <- brewer.pal(5, "Set2") 
+
+```
+
+About 13% of the rows have missing values. We can remove those rows or impute the data with regression/nearest neighbor.
+
+```{r}
+data <- na.omit(data_all)
+```
+
+## 1 - Summarize Data
+
+```{r}
+summary(data)
+```
+
+-   BPMeds: 1 if the patient was on blood pressure medication (categorical)
+-   prevalentStroke: 1 if the patient has had a stroke (categorical)
+-   PrevalentHyp: 1 if the patient was hypertensive (categorical)
+-   diaBP: 1 if the patient had diabetes (categorical)
+-   totChol : total cholesterol level (numerical)
+
+## 2 - Feature Engineering
+
+```{r}
+hd <-data$TenYearCHD #hd means heartdisease
+Age <- data$age
+Gender<- data$male
+Education <- data$education
+Currentsmoker<- data$currentSmoker
+
+data$male[data$male==0] <-"female"
+data$male[data$male==1] <-"male"
+
+hd[hd==0] <- "Has No Heart Disease"
+hd[hd==1] <- "Has Heart Disease"
+
+table(hd) 
+```
+
+```{r}
+categorical_variables <- all_of(c('currentSmoker','BPMeds','prevalentStroke','prevalentHyp','diabetes'))
+
+for(col in categorical_variables) {
+  data[col][data[col] == 1] <- 'Yes'
+  data[col][data[col] == 0] <- 'No'
+}
+
+```
+
+## 3 - Histograms
+
+##### a. Gender Frequency
+
+```{r}
+#Gender
+data$male[data$male==0] <-"female"
+data$male[data$male==1] <-"male"
+
+gender_table<- addmargins(table(data$male))
+gender_table
+
+ggplot(data, aes(factor(data$male),  fill= factor(data$male)))+geom_bar()+ theme_classic() +labs(title=("Gender Count"))
+```
+
+##### b. Age Frequency
+
+```{r}
+#Age
+
+hist(data$age,  main = "Histogram of Age Frequency")
+
+AgeGroup <- cut(data$age, c(30, 40, 50, 60, 70))
+levels(AgeGroup) <- c("30's", "40's", "50's", "Above 60's")
+
+barplot(table(AgeGroup), col=coul,main = "Frequency of Age Group")
+```
+
+##### c. Education Level Frequency
+
+```{r}
+#Education
+
+data$education[data$education==1] <-"less than hs"
+data$education[data$education==2] <-"hs grads"
+data$education[data$education==3] <-"college grads"
+data$education[data$education==4] <-"post college grads"
+ed<- data$education
+ed_table <- table(data$education)
+addmargins(ed_table)
+  
+# to sort the education levels in an order that makes sense instead of alphabetical,
+# we will use factor.
+# First, we will create a level
+
+education_levels <- c("less than hs", "hs grads", "college grads", "post college grads")
+ed_leveled <- factor (ed, levels =education_levels)
+
+barplot(table(ed_leveled), col= coul, main = "Education Levels Frequency")
+```
+
+##### d. Current SmokerFrequency
+
+```{r}
+
+currentsmoker<- data$currentSmoker
+
+#Recoding the binary data  
+currentsmoker[currentsmoker==0] <-"non-Smoker"
+currentsmoker[currentsmoker==1] <-"Smoker"
+table(currentsmoker)
+
+barplot(table(currentsmoker), main="Histogram of Numbers of Current Smoker")
+```
+
+##### e. Cigs Per Day Frequency
+
+```{r}
+
+SmokerTypes<- cut(data$cigsPerDay, c(0, 5, 10, 20, 70, 90))
+levels(SmokerTypes) <- c("Non-smoker", "light smoker", "casual smoker", "heavy smoker", "cigarette addict")
+SmokerTypesTable<- table(SmokerTypes)
+barplot(table(SmokerTypes), col=coul , main = "Cigarettes per Day")
+```
+
+##### f. BP Meds Frequency
+
+```{r}
+barplot(table(data$BPMeds),
+        main='Patients on Blood Pressure Medication',
+        names.arg=c("No", "Yes"))
+```
+
+##### g. Prevalent Strokes Frequency
+
+```{r}
+barplot(table(data$prevalentStroke),
+        main='Patients with a history of strokes',
+        names.arg=c("No", "Yes"))
+```
+
+##### h. Prevalent Hypertension Frequency
+
+```{r}
+barplot(table(data$prevalentHyp),
+        main='Patients with hypertension',
+        names.arg=c("No", "Yes"))
+
+```
+
+##### i. Stroke Frequency
+
+```{r}
+barplot(table(data$prevalentStroke),
+        main='Patients with a history of strokes',
+        names.arg=c("No", "Yes"))
+
+```
+
+##### h. DiaBP Frequency
+
+```{r}
+diabp <- data['diaBP']
+diabp <- sapply(diabp, as.numeric)
+ndiabp <- cut(diabp, c(0,80,89,max(diabp)))
+levels(ndiabp) <- c('Normal', 'At risk', 'High Blood Pressure')
+hist(diabp, main = 'Histogram of diastolic blood pressure')
+barplot(table(ndiabp), main = 'Histogram of diastolic blood pressure')
+```
+
+##### j.  Syst BP Frequency
+
+```{r}
+sysbp <- data['sysBP']
+sysbp <- sapply(sysbp, as.numeric)
+nsysbp <- cut(sysbp, c(0,120,139,max(sysbp)))
+levels(nsysbp) <- c('Normal', 'At risk', 'High Blood Pressure')
+hist(sysbp, main = 'Histogram of systolic blood pressure')
+barplot(table(nsysbp), main = 'Histogram of systolic blood pressure')
+```
+
+##### k. BMI
+
+```{r}
+bmi <- data['BMI']
+bmi <- sapply(bmi, as.numeric)
+
+nbmi <- cut(bmi, c(0,18.5,25,30,max(bmi)))
+levels(nbmi) <- c('underweight', 'healthy weight', 'overweight', 'obesity')
+hist(bmi, main = 'Histogram of BMI')
+barplot(table(nbmi), main = 'Histogram of BMI by Levels')
+```
+
+##### l. Heart Rate
+
+```{r}
+heartrate <- data['heartRate']
+heartrate <- sapply(heartrate, as.numeric)
+hist(heartrate, main = 'Histogram of heart rate')
+```
+
+##### m. Glucose
+
+```{r}
+glucose <- data['glucose']
+glucose <- sapply(glucose, as.numeric)
+nglucose <- cut(glucose, c(0,99,125,max(glucose)))
+levels(nglucose) <- c('normal', 'prediabetes', 'diabetes')
+hist(glucose, main = 'Histogram of Glucose')
+barplot(table(nglucose), main = 'Histogram of Glucose by Levels')
+```
+
+## 4- Checking for Outliers
+
+```{r}
+#systolic blood pressure
+
+# get mean and Standard deviation
+mean_sysbp = mean(data$sysBP)
+std_sysbp = sd(data$sysBP)
+
+# get threshold values for outliers
+Tmin_sysbp = mean_sysbp-(3*std_sysbp)
+Tmax_sysbp = mean_sysbp+(3*std_sysbp)
+
+# find outlier
+data$sysBP[which(data$sysBP < Tmin_sysbp | data$sysBP > Tmax_sysbp)]
+
+#remove outlier
+#data1$sysBP[which(data1$sysBP > Tmin_sysbp | data1$sysBP < Tmax_sysbp)]
+```
+
+```{r}
+#diastolic blood pressure
+
+# get mean and Standard deviation
+mean_diabp = mean(data$diaBP)
+std_diabp = sd(data$diaBP)
+
+# get threshold values for outliers
+Tmin_diabp = mean_diabp-(3*std_diabp)
+Tmax_diabp = mean_diabp+(3*std_diabp)
+
+# find outlier
+data$diaBP[which(data$diaBP < Tmin_diabp | data$diaBP > Tmax_diabp)]
+```
+
+## 5 - Histograms between the predictors and the response variable
+
+```{r}
+#proportion of the people who had heart disease by Gender
+gender_table <-table(data$male)
+prop.table(gender_table)
+
+gender_hd_table<- table(data$male,data$TenYearCHD)
+gender_hd_proportion<- prop.table(gender_hd_table)
+gender_hd_proportion
+
+barplot(gender_hd_proportion, col=rainbow(2), legend.text = c("female", "male"), main="Proportion of Heart Disease by Gender")
+
+barplot(gender_hd_proportion[,2], col=rainbow(2), main="People with Heart Disease by Gender")
+```
+
+Male seems to have slightly more heart disease.
+
+```{r}
+gender_hd_table1<- table(data$TenYearCHD,data$male)
+gender_hd_table1
+barplot(gender_hd_table1[2,], col=coul, main="Frequency of Heart Disease by Gender")
+```
+
+```{r}
+#create another categorical column based on the age
+data<- data%>% 
+  mutate(AgeGroup = case_when(
+age<40 & age>30 ~ "30s",
+age>=40 & age<50 ~ "40s",
+age>=50 & age<60 ~ "50s",
+age>=60  ~ "above60s"
+))
+
+table(AgeGroup)
+agegroup_table <- table(AgeGroup, data$TenYearCHD)
+prop_agegroup <- prop.table(agegroup_table)
+
+
+barplot(agegroup_table, col=coul, legend.text=c("30s", "40s", "50s", "above60s"), main="Frequencies of Heart Disease by Age Group")
+
+barplot(prop_agegroup, col=coul, main="Heart Disease Proportion by Age Group")
+
+barplot(prop_agegroup[,2], col=coul, main="Age Group with Heart Disease")
+```
+
+People in 50s seem to have heart disease the most.
+
+```{r}
+ed_table<-table(ed_leveled)
+ed_table
+prop.table(ed_table)
+
+edhd<-table(ed_leveled, data$TenYearCHD)
+edhd
+edhd_proportion<-prop.table(edhd)
+
+barplot(edhd_proportion[,2], col=coul, main="Proportion of People with Heart Disease by Education Levels")
+
+#pink is the people with heart disease
+```
+
+We can see how less than high school groups has the highest proportion of having a heart disease.\
+
+```{r}
+#Current Smoker 
+smokertable<- table(data$currentSmoker)
+prop.table(smokertable)
+smokerhd <- table(data$currentSmoker, data$TenYearCHD)
+smoker_hd_prop<- prop.table(smokerhd)
+smoker_hd_prop
+smoker_hd_prop[,2]
+barplot(smoker_hd_prop[,2], col=rainbow(2), main="Proportion of Smokers who Have Heart Disease")
+
+```
+
+Seems like there is barely any difference between current smoker in number of people with heart disease. Surprising. Maybe smoking at the moment is not the best indicator of predicting heart disease.\
+
+```{r}
+#Cigaretts Per Day
+#create another categorical column based on types of smokers
+
+data<- data%>% 
+mutate(SmokerTypes = case_when(
+cigsPerDay==0 ~"non-smoker",
+cigsPerDay>0 & cigsPerDay<5 ~ "light smoker",
+cigsPerDay>=5 & cigsPerDay<10 ~ "casual smoker",
+cigsPerDay>=10 & cigsPerDay<20 ~ "heavy smoker",
+cigsPerDay>=20 ~ "cigarett addict",
+))
+
+# View(data)
+
+SmokerTypesTable
+Smoker_HD<- table(SmokerTypes, data$TenYearCHD) 
+Smoker_HD
+proportion_smoke_hd <- prop.table(Smoker_HD)
+proportion_smoke_hd 
+
+barplot(proportion_smoke_hd[,2], col=coul, main="People with Heart Disease by Smoker Types")
+```
+
+```{r}
+table(data$BPMeds)
+bpmedstable<- table(data$BPMeds, data$TenYearCHD)
+BPMeds_proportion<-prop.table(bpmedstable)
+BPMeds_proportion
+
+barplot(BPMeds_proportion, col=coul, legend.text=c("on Meds", "not on Meds"), main="Blood Pressure Medication and Heart Disease")
+
+barplot(BPMeds_proportion[,2], col=coul, legend.text=c("Non on Meds", "on Meds"), main="Heart Disease Proportion Based on Blood Pressure Medication")
+```
+
+The second chart seems to show a majority of people with heart disease was NOT on blood pressure medication.
+
+```{r}
+data$diaBP <- ndiabp
+
+diaBP_pro <- data %>% 
+  group_by(diaBP) %>% 
+  summarise(percent = n()/nrow(data))
+
+barplot(as.matrix(data.frame(Normal = as.numeric(diaBP_pro['percent'][1,]), 
+           At_risk = as.numeric(diaBP_pro['percent'][2,]),
+           High_Blood_Pressure = as.numeric(diaBP_pro['percent'][3,]))), ylim=c(0,1),col=coul, main="Diatolic Blood Pressure Level vs. Heart Disease Proportion")
+```
+
+```{r}
+boxplot(as.matrix(data.frame(Normal = as.numeric(diaBP_pro['percent'][1,]), 
+           At_risk = as.numeric(diaBP_pro['percent'][2,]),
+           High_Blood_Pressure = as.numeric(diaBP_pro['percent'][3,]))), ylim=c(0,1), )
+```
+
+```{r}
+data$BMI <- nbmi
+
+bmi_pro <- data %>% group_by(BMI) %>% summarise(percent = n()/nrow(data))
+
+barplot(as.matrix(data.frame(underweight = as.numeric(bmi_pro['percent'][1,]), 
+           healthy_weight = as.numeric(bmi_pro['percent'][2,]),
+           overweight = as.numeric(bmi_pro['percent'][3,]), 
+        obesity = as.numeric(bmi_pro['percent'][4,]))),ylim=c(0,1))
+```
+
+```{r}
+data$diaBP <- ndiabp
+
+diaBP_pro <- data %>% group_by(diaBP) %>% summarise(percent = n()/nrow(data))
+
+diaBP_pro
+
+barplot(as.matrix(data.frame(Normal = as.numeric(diaBP_pro['percent'][1,]), 
+           At_risk = as.numeric(diaBP_pro['percent'][2,]),
+           High_Blood_Pressure = as.numeric(diaBP_pro['percent'][3,]))), ylim=c(0,1))
+
+```
+
+## 6- Boxplots between the Numerical Variables and the Response
+
+```{r}
+boxplot(data$totChol~data$TenYearCHD, main="totChol vs. Heart Disease")
+boxplot(data$age~data$TenYearCHD, main="Age vs. Heart Disease")
+boxplot(data$cigsPerDay~data$TenYearCHD, main="Cigaretts Per Day vs. Heart Disease")
+boxplot(data$sysBP~data$TenYearCHD,  main="Systolic Blood Pressure vs. Heart Disease")
+boxplot(data$diaBP~data$TenYearCHD,  main="Diatolic Blood Pressure vs. Heart Disease")
+boxplot(data$BMI~data$TenYearCHD,  main="BMI vs. Heart Disease")
+boxplot(data$heartRate~data$TenYearCHD,  main="Heart Rate vs. Heart Disease")
+boxplot(data$glucose~data$TenYearCHD,  main="Glucose vs. Heart Disease")
+```
+
+## 7- Check for correlation between categorical variables
+
+```{r, echo = TRUE}
+categorical_variables <- all_of(c('currentSmoker','BPMeds','prevalentStroke','prevalentHyp','diabetes'))
+data %>% 
+  select(categorical_variables) %>%
+  summarise_all(funs(chisq.test(.,data$TenYearCHD)$p.value)) -> p_values
+data %>% 
+  select(categorical_variables) %>%
+  summarise_all(funs(chisq.test(.,data$TenYearCHD)$statistic)) -> statistics
+
+chisquare_output <- do.call(rbind, list(chi_squares=statistics, p_values=p_values))
+
+```
+
+## 8 - Interaction between variables
+
+'currentSmoker','BPMeds','prevalentStroke','prevalentHyp','diabetes'
+
+```{r}
+# Stroke and hypertension history
+glmodel1<-glm(TenYearCHD~prevalentStroke+prevalentHyp+prevalentStroke*prevalentHyp,
+              data = data,
+              family="binomial")
+plot(allEffects(glmodel1), ask=FALSE)
+
+# Diabetes history and BP meds
+glmodel1<-glm(TenYearCHD~diabetes+BPMeds+diabetes*BPMeds,
+              data = data,
+              family="binomial")
+plot(allEffects(glmodel1), ask=FALSE)
+
+# Diabetes history and current smoker
+glmodel1<-glm(TenYearCHD~currentSmoker+diabetes+currentSmoker*diabetes,
+              data = data,
+              family="binomial")
+plot(allEffects(glmodel1), ask=FALSE)
+```
+
+## 9- Correlation Matrices of Numerical Variables
+
+```{r}
+
+data %>%select(age, cigsPerDay, totChol, sysBP, diaBP, BMI , heartRate, glucose)%>% summary()
+data.mat <- as.matrix(data %>%
+                       select(age, cigsPerDay, totChol, sysBP, diaBP, BMI , heartRate, glucose)%>%
+                        mutate_all(as.numeric))
+M <- rcorr(data.mat)
+# M$r
+corrplot(M$r, method = "number")
+
+```
+
+## 10. Residual Series Plot
+
+```{r}
+l<-glm(TenYearCHD ~ age + cigsPerDay + totChol + sysBP + diaBP + BMI + heartRate+glucose, data=data, family=binomial)
+
+
+residualPlots(l)
+```
+
+## 11- Marginal Model Plot
+
+```{r}
+mmp(l)
+```
+
+## 12- VIF's \[Checking for Multicollinearity\]
+
+```{r}
+#A way to quantify the impact of multicollinearity is to look at the VIF (variance inflation factor). 
+
+#A VIF close to 1 would imply no correlation. The larger the VIF the larger the amount of multicollinearity.
+
+vif(l)
+```
