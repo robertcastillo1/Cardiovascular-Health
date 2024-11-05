@@ -22,6 +22,10 @@ library(DAAG)
 library(RColorBrewer)
 library(corrplot)
 library(Hmisc)
+library(sjPlot)
+library(caret)
+library(ROCR)
+library(pROC)
 ```
 
 # EDA
@@ -529,3 +533,579 @@ mmp(l)
 
 vif(l)
 ```
+
+
+# Modeling and Analysis
+
+## Load dataset, convert categorical features to factors, and add new features found from EDA
+
+&nbsp;&nbsp;
+```{r}
+framingham_df <- na.omit(read.csv("framingham.csv"))
+
+
+# convert original categorical variables to factors
+categorical_variables <- c('TenYearCHD','education','currentSmoker','BPMeds','prevalentStroke','prevalentHyp','diabetes')
+framingham_df[,categorical_variables] <- lapply(framingham_df[,categorical_variables], factor)
+
+
+# rename factor levels of some original features 
+levels(framingham_df$education) <- c("less than hs", "hs grads", "college grads", "post college grads")
+
+
+# add engineered features 
+framingham_df <- framingham_df %>% 
+                 mutate(age_group = case_when(
+                 age<40 & age>30 ~ "30s",
+                 age>=40 & age<50 ~ "40s",
+                 age>=50 & age<60 ~ "50s",
+                 age>=60  ~ "above60s"
+                 ))
+   
+framingham_df <- framingham_df %>% 
+                 mutate(smoker_type = case_when(
+                 cigsPerDay==0 ~"non-smoker",
+                 cigsPerDay>0 & cigsPerDay<5 ~ "light smoker",
+                 cigsPerDay>=5 & cigsPerDay<10 ~ "casual smoker",
+                 cigsPerDay>=10 & cigsPerDay<20 ~ "heavy smoker",
+                 cigsPerDay>=20 ~ "cigarett addict",
+                 ))
+
+diabp_cat <- cut(framingham_df$diaBP, c(0,80,89,max(framingham_df$diaBP)))
+levels(diabp_cat) <- c('Normal', 'At risk', 'High Blood Pressure')
+framingham_df$diabp_group <- diabp_cat
+
+sysbp_cat <- cut(framingham_df$sysBP, c(0,120,139,max(framingham_df$sysBP)))
+levels(sysbp_cat) <- c('Normal', 'At risk', 'High Blood Pressure')
+framingham_df$sysbp_group <- sysbp_cat
+
+bmi_cat <- cut(framingham_df$BMI, c(0, 18.5, 25, 30, max(framingham_df$BMI)))
+levels(bmi_cat) <- c('underweight', 'healthy weight', 'overweight', 'obesity')
+framingham_df$diabp_group <- bmi_cat
+
+glucose_cat <- cut(framingham_df$glucose, c(0,98,max(framingham_df$glucose)))
+levels(glucose_cat) <- c('Normal', 'Prediabetic / Diabetic')
+framingham_df$diabp_group <- glucose_cat
+
+
+# add significant numerical interactions from EDA 
+framingham_df$cigs_and_sysbp <- framingham_df$cigsPerDay*framingham_df$sysBP
+framingham_df$age_and_cigs <- framingham_df$cigsPerDay*framingham_df$age
+framingham_df$gl_and_sysbp <- framingham_df$glucose*framingham_df$sysBP
+
+
+# add potentially useful quadratic terms from EDA
+framingham_df$sysBP_quad <- (framingham_df$sysBP)^2
+framingham_df$diaBP_quad <- (framingham_df$diaBP)^2
+framingham_df$glucose_quad <- (framingham_df$glucose)^2
+
+
+# remove variables that were permanently replaced with categorical cuts
+framingham_df = subset(framingham_df, select = -c(age, cigsPerDay) )
+
+```
+
+&nbsp;&nbsp;
+
+## Logistic Regression Modeling w/o Interaction Features
+
+
+### Backward Stepwise Feature Selection
+
+&nbsp;&nbsp;
+
+```{r}
+glm_no_int1 <- glm(TenYearCHD ~ . - cigs_and_sysbp - age_and_cigs - gl_and_sysbp,
+                   data=framingham_df, 
+                   family=binomial)
+
+summary(glm_no_int1)
+
+# use backward selection
+glm_no_int2 <- step(glm_no_int1, direction = "backward", trace=0) 
+summary(glm_no_int2)
+
+
+# difference in deviance can be used to compare the backward selection model
+# and the original
+anova(glm_no_int2, glm_no_int1, test="Chisq")
+
+```
+
+&nbsp;&nbsp;
+
+From the above test, we can see that the model with the features selected from the backward selection seems to be sufficient (i.e. # there was no significant difference in original model with extra terms, so we use the simpler model (model_no_int2)). 
+
+### Goodness of fit and Variance Explained Measures
+
+We now check for goodness of fit, and examine the pseudo R^2 value of the simpler model.
+
+&nbsp;&nbsp;
+
+
+```{r}
+
+best_LR_no_int <- glm(TenYearCHD ~ male + prevalentStroke + prevalentHyp + 
+                      totChol + sysBP + diaBP + glucose + age_group + smoker_type + 
+                      diaBP_quad, 
+                      data = framingham_df,
+                      family = binomial)
+summary(best_LR_no_int)
+
+# Goodness of Fit tests to be used with caution (binomial group sizes are small)
+
+# test goodness of fit (pearson)
+chi_stat <- sum(residuals(best_LR_no_int, type = "pearson")^2)
+print(paste("Pearson Goodness of Fit p-value =", 1 - pchisq(chi_stat, 3640)))
+
+
+# test goodness of fit (residual deviance vs null deviance)
+dev_diff <- 3120.5  - 2758.5
+df_diff <- 3655 - 3640
+print(paste("Deviance Goodness of Fit p-value =", 1 - pchisq(dev_diff, df_diff)))
+
+
+# pseudo R^2
+pRsq <- 1 - (2758.5/3120.5)
+print(paste("pseudo-R^2 = ", pRsq))
+
+
+
+```
+
+We can see from the summary that the AIC is 2790.5.
+
+Since the calculated value of Pearson Chi square has large p-value, we fail to reject the null hypothesis, and conclude that the model fits the data well. Also, the small p-value for the Deviance Goodness of Fit test indicates that our model has less error than intercept only model and explains some of the variance in the outcome variable.
+
+The pseudo R^2 is about 12%. However, that this pseudo R^2 metric is not very effective in measuring the varaince explained in many logistic regression settings.
+
+
+### Influence & Outlier, Residual Analysis, and Goodness of Fit (MMP) Plots
+
+```{r, warning=FALSE}
+plot(best_LR_no_int)
+influenceIndexPlot(best_LR_no_int, vars=c("Cook","hat"), id.n=3)
+
+residualPlot(best_LR_no_int)
+#residualPlots(best_LR_no_int)
+
+mmp(best_LR_no_int)
+#mmps(best_LR_no_int)
+
+```
+
+
+Although some hat-values exceed the conventional $2 \cdot\frac{2p}{n}$ (where our p is 10 predictors here) and n is the number of used observations, there are no large Std. Pearson Residuals as leverage gets larger. Most of the Std. Pearson Residuals remain relatively small throughout the entire range of hat values. This indicates that we mostly likely do not have any bad leverage (or influential) points.
+
+Recall that the guidelines commonly used for Cook's distance is:
+
+If $D_i$ is greater than 0.5, then the ith data point is worthy of further investigation as it may be influential.
+If $D_i$ is greater than 1, then the $i$th data point is quite likely to be influential.
+Or, if $D_i sticks out like a sore thumb from the other $D_i$ values, it is almost certainly influential.
+
+
+Thus, we can see above that no Cook's distance is over 0.5 (all values are less than about 0.01), and no Cook's Distance really stick out terribly over the entire set of values. Maybe $i=3972$, however, it doesn't seem to stick out substantially compared to the rest of the values of the set, so we do not remove it from our model.
+
+We can see above that the average pearson residual remains sufficiently close to 0 throughout the entire range of the linear predictor values, and throughout the entire range of each predictor variable independently, indicating a good fit for our data.
+
+Additionally, the Marginal Model Plot displays a *very* close fit between the data and our model (the probability of having 10 year risk of coronary heart disease) across the entire range of the linear predictor values, and throughout the entire range of each numerical predictor variable independently. This indicates that this logistic model without interaction, is a very good fit for the data.
+
+
+### 10-fold Cross Validation For Accuracy and AUC
+
+
+&nbsp;&nbsp;
+
+```{r}
+set.seed(7)
+
+train.control <- trainControl(method = "cv", number = 10)
+
+cv_best_glm1 <- train(TenYearCHD ~ male + prevalentStroke + prevalentHyp + 
+                      totChol + sysBP + diaBP + glucose + age_group + smoker_type + 
+                      diaBP_quad, 
+                      data = framingham_df, 
+                      method = "glm",
+                      family = "binomial",
+                      trControl = train.control)
+print(cv_best_glm1)
+
+```
+&nbsp;&nbsp;
+
+
+The above 10-Fold Cross Validation gives us an estimated 85.2% test accuracy. This demonstrates good predictive performance on unseen data for the logistic regression model without interaction features.
+
+
+## Logistic Regression Modeling w/ Interaction Features
+
+
+### Backward Stepwise Feature Selection
+
+&nbsp;&nbsp;
+
+```{r}
+glm_w_int1 <- glm(TenYearCHD ~ . + currentSmoker*diabetes + education*male,
+                   data=framingham_df, 
+                   family=binomial)
+
+summary(glm_w_int1)
+
+# use backward selection
+glm_w_int2 <- step(glm_w_int1, direction = "backward", trace=0) 
+summary(glm_w_int2)
+
+
+# difference in deviance can be used to compare the backward selection model
+# and the original
+anova(glm_w_int2, glm_w_int1, test="Chisq")
+
+```
+
+&nbsp;&nbsp;
+
+From the above test, we can see that the model with the features selected from the backward selection seems to be sufficient (i.e. # there was no significant difference in original model with extra terms, so we use the simpler model (model_w_int2)). Note, the feature selection process dropped all of the the categorical interaction terms.
+
+### Goodness of fit and Variance Explained Measures
+
+We now check for goodness of fit, and examine the pseudo R^2 value of the simpler model.
+
+&nbsp;&nbsp;
+
+
+```{r}
+
+best_LR_w_int <- glm(TenYearCHD ~ male + prevalentStroke + prevalentHyp + 
+                     totChol + sysBP + diaBP + glucose + age_group + age_and_cigs + 
+                     diaBP_quad, 
+                     family = binomial, 
+                     data = framingham_df)
+summary(best_LR_w_int)
+
+# Goodness of Fit tests to be used with caution (binomial group sizes are small)
+
+# test goodness of fit (pearson)
+chi_stat <- sum(residuals(best_LR_w_int, type = "pearson")^2)
+print(paste("Pearson Goodness of Fit p-value =", 1 - pchisq(chi_stat, 3643)))
+
+
+# test goodness of fit (residual deviance vs null deviance)
+dev_diff <- 3120.5  - 2758.2
+df_diff <- 3655 - 3643
+print(paste("Deviance Goodness of Fit p-value =", 1 - pchisq(dev_diff, df_diff)))
+
+
+# pseudo R^2
+pRsq <- 1 - (2758.2/3120.5)
+print(paste("pseudo-R^2 = ", pRsq))
+
+
+
+```
+
+We can see from the summary that the AIC is 2784.2.
+
+Since the calculated value of Pearson Chi square has large p-value, we fail to reject the null hypothesis, and conclude that this model also fits the data well. Also, the small p-value for the Deviance Goodness of Fit test indicates that our model has less error than intercept only model and explains some of the variance in the outcome variable.
+
+The pseudo R^2 is also about 12%. However, that this pseudo R^2 metric is not very effective in measuring the varaince explained in many logistic regression settings.
+
+
+### Influence & Outlier, Residual Analysis, and Goodness of Fit (MMP) Plots
+
+```{r, warning=FALSE}
+plot(best_LR_w_int)
+influenceIndexPlot(best_LR_w_int, vars=c("Cook","hat"), id.n=3)
+
+residualPlot(best_LR_w_int)
+#residualPlots(best_LR_w_int)
+
+mmp(best_LR_w_int)
+#mmps(best_LR_w_int)
+
+```
+
+
+Although some hat-values exceed the conventional $2 \cdot\frac{2p}{n}$ (where our p is 15 predictors here) and n is the number of used observations, there are no large Std. Pearson Residuals as leverage gets larger. Most of the Std. Pearson Residuals remain relatively small throughout the entire range of hat values. This indicates that we mostly likely do not have any bad leverage (or influential) points.
+
+Recall that the guidelines commonly used for Cook's distance is:
+
+If $D_i$ is greater than 0.5, then the ith data point is worthy of further investigation as it may be influential.
+If $D_i$ is greater than 1, then the $i$th data point is quite likely to be influential.
+Or, if $D_i sticks out like a sore thumb from the other $D_i$ values, it is almost certainly influential.
+
+
+Thus, we can see above that no Cook's distance is over 0.5 (all values are less than about 0.02), and no Cook's Distance really stick out terribly over the entire set of values. Maybe $i=3972$, however, it doesn't seem to stick out substantially compared to the rest of the values of the set, so we do not remove it from our model.
+
+We can see above that the average pearson residual remains sufficiently close to 0 throughout the entire range of the linear predictor values, and throughout the entire range of each predictor variable independently, indicating a good fit for our data.
+
+Additionally, the Marginal Model Plot displays a *very* close fit between the data and our model (the probability of having 10 year risk of coronary heart disease) across the entire range of the linear predictor values, and throughout the entire range of each numerical predictor variable independently. This indicates that this logistic model with interactions, is a very good fit for the data.
+
+
+### 10-fold Cross Validation For Accuracy and AUC
+
+
+&nbsp;&nbsp;
+
+```{r}
+set.seed(7)
+
+train.control <- trainControl(method = "cv", number = 10)
+
+cv_best_glm2 <- train(TenYearCHD ~ male + prevalentStroke + prevalentHyp + 
+                      totChol + sysBP + diaBP + glucose + age_group + age_and_cigs + 
+                      diaBP_quad, 
+                      data = framingham_df, 
+                      method = "glm",
+                      family = "binomial",
+                      trControl = train.control)
+print(cv_best_glm2)
+
+```
+&nbsp;&nbsp;
+
+
+The above 10-Fold Cross Validation gives us an estimated 85.1% test accuracy. This demonstrates good predictive performance on unseen data for the logistic regression model with interaction features. However, the simpler logistic regression model w/o interaction features had a similar (about 0.1% better) test accuracy. We will analyze and compare these two models with more detail in later sections.
+
+
+## Random Forest Classifier for Baseline Comparison
+
+&nbsp;&nbsp;
+
+```{r}
+
+rf_model <-randomForest(TenYearCHD ~ ., 
+                        data=framingham_df,
+                        ntree=500, 
+                        mtry=8, 
+                        importance = TRUE) 
+print(rf_model)
+
+```
+
+&nbsp;&nbsp;
+
+
+
+### Get Random Forest Estimate for Test Error Using 10 fold CV 
+
+&nbsp;&nbsp;
+
+```{r}
+
+set.seed(7)
+
+train.control <- trainControl(method = "cv", number = 10)
+
+repGrid <- expand.grid(.mtry=c(8))  # standard default parameter
+
+cv_rf <- train(TenYearCHD ~ ., 
+                 data=framingham_df, 
+                 method = "rf", 
+                 trControl = train.control,
+                 ntree=500, 
+                 tuneGrid = repGrid)
+  
+print(cv_rf)
+
+```
+
+&nbsp;&nbsp;
+
+
+### Feature Importances with Random Forest Model
+
+&nbsp;&nbsp;
+
+```{r}
+
+# output the importances
+importance(rf_model)
+
+# let's save the varImp object
+imp <- varImpPlot(rf_model) 
+
+# this part just creates the data.frame for the plot part
+imp <- as.data.frame(imp)
+imp$varnames <- rownames(imp) # row names to column
+rownames(imp) <- NULL
+names(imp)[1] <- "MeanDecreaseAccuracy"
+# this is the plot part, be sure to use reorder with the correct measure name
+ggplot(data=imp, aes(x=reorder(varnames, +MeanDecreaseAccuracy), y=MeanDecreaseAccuracy, fill=varnames)) +
+geom_bar(stat = "identity") +
+coord_flip() +
+theme(legend.position="none") +
+scale_fill_discrete(name="Variable Group") +
+ylab("MeanDecreaseAccuracy") + 
+xlab(" ")
+
+```
+
+&nbsp;&nbsp;
+
+### ROC
+
+```{r}
+CHD_Table <- table(framingham_df$TenYearCHD)
+prec_rec_baseline <- CHD_Table[2]/sum(CHD_Table)
+
+# Split data
+train.index <- createDataPartition(framingham_df$TenYearCHD, p=0.8, list = F)
+train_data <- framingham_df[train.index,]
+test_data <- framingham_df[-train.index,]
+
+# Retrain Models
+lr_model_no_int <- glm(TenYearCHD ~ male + prevalentStroke + prevalentHyp + 
+                      totChol + sysBP + diaBP + glucose + age_group + smoker_type + 
+                      diaBP_quad, 
+                      data = train_data,
+                      family = binomial)
+lr_model_w_int <- glm(TenYearCHD ~ male + prevalentStroke + prevalentHyp + 
+                     totChol + sysBP + diaBP + glucose + age_group + age_and_cigs + 
+                     diaBP_quad, 
+                     family = binomial, 
+                     data = train_data)
+random_forest_model <- randomForest(TenYearCHD ~ ., 
+                        data=train_data,
+                        ntree=500, 
+                        mtry=8, 
+                        importance = TRUE)
+
+result_no_int <- predict(lr_model_no_int,newdata=test_data, type = "response")
+result_w_int <- predict(lr_model_w_int, newdata = test_data, type = "response")
+result_rf <- predict(random_forest_model,newdata = test_data, type = "prob")
+
+
+
+pred_no_int <- prediction(result_no_int,test_data$TenYearCHD)
+pred_w_int <- prediction(result_w_int,test_data$TenYearCHD)
+pred_rf <- prediction(result_rf[,2],test_data$TenYearCHD)
+
+
+acc_no_int <- performance(pred_no_int,"acc")
+acc_w_int <- performance(pred_w_int,"acc")
+acc_rf <- performance(pred_rf,"acc")
+
+plot(acc_no_int)
+plot(acc_w_int)
+plot(acc_rf)
+
+roc_curve_no_int <- performance(pred_no_int,"tpr","fpr")
+roc_curve_w_int <- performance(pred_w_int,"tpr","fpr")
+roc_curve_rf <- performance(pred_rf,"tpr","fpr")
+
+prec_rec_curve_no_int <- performance(pred_no_int,"prec","rec")
+prec_rec_curve_w_int <- performance(pred_w_int,"prec","rec")
+prec_rec_curve_rf <- performance(pred_rf,"prec","rec")
+
+plot(roc_curve_no_int,col = "blue")
+plot(roc_curve_w_int, add = TRUE, col = "red")
+plot(roc_curve_rf,add = TRUE, col = "green") + abline(0,1)
+
+
+plot(prec_rec_curve_no_int,col = "blue")
+plot(prec_rec_curve_w_int, add = TRUE, col = "red")
+plot(prec_rec_curve_rf, add = TRUE, col = "green") + abline(prec_rec_baseline,0)
+
+```
+
+### Confusion Matrices
+```{r}
+# No Interaction Model
+
+no_int_threshold <- as.factor(as.numeric(result_no_int>.45))
+no_int_table <- table(test_data$TenYearCHD, no_int_threshold)
+confusionMatrix(no_int_table)
+
+# With Interaction Model
+w_int_threshold <- as.factor(as.numeric(result_w_int>.45))
+w_int_table <- table(test_data$TenYearCHD, w_int_threshold)
+confusionMatrix(w_int_table)
+
+# RF Model
+rf_threshold <- as.factor(as.numeric(result_rf[,2]>.45))
+rf_table <- table(test_data$TenYearCHD, rf_threshold)
+confusionMatrix(rf_table)
+
+```
+
+### Calculate AUC and Confidence Intervals
+```{r}
+# No Interaction Model
+roc_no_int <- roc(test_data$TenYearCHD, result_no_int)
+auc_no_int <- roc_no_int$auc
+ci_no_int <- ci(roc_no_int, conf.level = 0.95)
+lower_no_int <- ci_no_int[1]
+mean_no_int <- ci_no_int[2]
+upper_no_int <- ci_no_int[3]
+cat("Model With No Interaction AUC: ",auc_no_int,"\n")
+cat("Model With No Interaction CI: [", lower_no_int, ", ", upper_no_int,"]")
+
+# With Interaction Model
+roc_w_int <- roc(test_data$TenYearCHD, result_w_int)
+auc_w_int <- roc_w_int$auc
+ci_w_int <- ci(roc_w_int, conf.level = 0.95)
+lower_w_int <- ci_w_int[1]
+mean_w_int <- ci_w_int[2]
+upper_w_int <- ci_w_int[3]
+cat("Model With Interaction AUC: ",auc_w_int,"\n")
+cat("Model With Interaction CI: [", lower_w_int, ", ", upper_w_int,"]")
+
+# RF Model
+roc_rf <- roc(test_data$TenYearCHD, result_rf[,2])
+auc_rf <- roc_rf$auc
+ci_rf <- ci(roc_rf, conf.level = 0.95)
+lower_rf <- ci_rf[1]
+mean_rf <- ci_rf[2]
+upper_rf <- ci_rf[3]
+cat("Random Forest Model AUC: ",auc_rf,"\n")
+cat("Random Forest Model CI: [", lower_rf, ", ", upper_rf,"]")
+
+```
+
+### Plot the AUC Confidence Intervals
+```{r}
+x <- c(mean_no_int, mean_w_int, mean_rf)
+y <- c("No Interaction", "With Interaction", "Random Forest")
+low <- c(lower_no_int, lower_w_int, lower_rf)
+up <- c(upper_no_int, upper_w_int, upper_rf)
+
+ci_df <- data.frame(x = x, y = y, low = low, up = up)
+ggplot(ci_df, aes(x,y)) + geom_point() + geom_errorbar(aes(xmin = low, xmax = up)) + xlim(.6,1.00) + xlab("AUC") + ylab("Model")
+```
+
+### Odds Ratios, CI, and P-values
+```{r}
+# No Interaction Model
+no_int_summary <- summary(best_LR_no_int)
+no_int_odds <- exp(coef(best_LR_no_int))
+no_int_odds_ci <- exp(confint(best_LR_no_int))
+no_int_pvalues <- no_int_summary$coefficients[,4]
+no_int_matrix <- data.frame(no_int_odds, no_int_odds_ci, no_int_pvalues)
+no_int_matrix <- no_int_matrix %>% rename(odds_ratio = no_int_odds, X2.5 =  X2.5.., X97.5 = X97.5.., pvalues = no_int_pvalues)
+no_int_matrix
+```
+
+
+```{r}
+# With Interaction Model
+w_int_summary <- summary(best_LR_w_int)
+w_int_odds <- exp(coef(best_LR_w_int))
+w_int_odds_ci <- exp(confint(best_LR_w_int))
+w_int_pvalues <- w_int_summary$coefficients[,4]
+w_int_matrix <- data.frame(w_int_odds, w_int_odds_ci, w_int_pvalues)
+w_int_matrix <- w_int_matrix %>% rename(odds_ratio = w_int_odds, X2.5 =  X2.5.., X97.5 = X97.5.., pvalues = w_int_pvalues)
+w_int_matrix
+```
+
+### Plot Odds Ratios and Confidence Intervals
+```{r}
+# No interaction
+plot_model(best_LR_no_int)
+```
+
+```{r}
+#With Interaction
+plot_model(best_LR_w_int)
+```
+
+
